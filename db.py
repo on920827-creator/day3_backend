@@ -11,6 +11,12 @@ from datetime import datetime, timedelta, timezone
 KST = timezone(timedelta(hours=9))
 
 
+def env(name: str, default: str = "") -> str:
+    """환경변수를 읽되 앞뒤 공백과 따옴표(" ')를 지워서 돌려준다 (Variables 입력 실수 방지)."""
+    v = os.getenv(name, default) or default
+    return v.strip().strip('"').strip("'").strip()
+
+
 def kst(ts: str) -> str:
     """DB 시각(UTC 등) → '2026-11-10 14:00' (한국 시간)"""
     return datetime.fromisoformat(ts).astimezone(KST).strftime("%Y-%m-%d %H:%M")
@@ -18,10 +24,15 @@ def kst(ts: str) -> str:
 
 class SupabaseStore:
     kind = "supabase"
+    error = None
 
     def __init__(self, url, key):
         from supabase import create_client
         self.sb = create_client(url, key)
+
+    def ping(self):
+        """DB 에 실제로 닿는지 확인 (테이블이 없거나 주소·키가 틀리면 예외)"""
+        self.sb.table("air_readings").select("id").limit(1).execute()
 
     def save_readings(self, rows):
         if not rows:
@@ -53,10 +64,14 @@ class SupabaseStore:
 
 class MemoryStore:
     kind = "memory(임시)"
+    error = None            # Supabase 연결에 실패해서 메모리로 켜졌다면 이유가 들어간다
 
     def __init__(self):
         self.rows = {}
         self._logs = []
+
+    def ping(self):
+        pass
 
     def save_readings(self, rows):
         for r in rows:
@@ -79,8 +94,16 @@ class MemoryStore:
 
 
 def get_store():
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    url = env("SUPABASE_URL")
+    key = env("SUPABASE_SECRET_KEY")
     if url and key:
-        return SupabaseStore(url, key)
+        if not url.startswith("http"):
+            url = "https://" + url                       # https:// 를 빼먹은 경우
+        url = url.rstrip("/").removesuffix("/rest/v1").rstrip("/")
+        try:
+            return SupabaseStore(url, key)
+        except Exception as e:                           # 연결 실패해도 서버는 죽지 않는다
+            s = MemoryStore()
+            s.error = f"Supabase 연결 실패: {type(e).__name__}: {e}"
+            return s
     return MemoryStore()

@@ -10,14 +10,23 @@ from sklearn.linear_model import LinearRegression
 from collect import grade_pm10
 
 LAGS = 3          # 직전 몇 시간을 볼지
-MIN_POINTS = 12   # 최소 몇 개가 쌓여야 학습할지
+MIN_POINTS = 12   # 이만큼 쌓이면 학습 예측, 적으면 간단 추정
 
 
-def predict_next(history: list[dict]) -> dict:
+def predict_next(history: list[dict], steps: int = 1) -> dict:
     vals = [h["pm10"] for h in history if h.get("pm10") is not None]
+    if not vals:
+        return {"ready": False, "points": 0, "message": "아직 쌓인 데이터가 없어요. 잠시 뒤 다시 눌러 주세요"}
+    steps = max(1, steps)
     if len(vals) < MIN_POINTS:
-        return {"ready": False, "points": len(vals),
-                "message": f"데이터가 {MIN_POINTS}개 이상 쌓여야 예측할 수 있어요 (지금 {len(vals)}개)"}
+        # 데이터가 적을 때: 학습 대신 '최근 값의 평균'으로 간단 추정 (정확도는 낮음)
+        recent = vals[-LAGS:]
+        est = max(0, round(sum(recent) / len(recent)))
+        spread = round(sum(abs(v - sum(vals) / len(vals)) for v in vals) / len(vals), 1)
+        return {"ready": True, "simple": True, "hours": steps, "path": [est] * steps,
+                "points": len(vals), "recent": vals[-12:], "next_pm10": est,
+                "next_grade": grade_pm10(est), "avg_error": spread,
+                "model": f"간단 추정(최근 {len(recent)}개 평균) — 데이터 {MIN_POINTS}개부터 학습 예측"}
 
     # 학습 문제 만들기: [t-3, t-2, t-1] → t
     X = [vals[i - LAGS:i] for i in range(LAGS, len(vals))]
@@ -29,15 +38,23 @@ def predict_next(history: list[dict]) -> dict:
     errors = [abs(p - t) for p, t in zip(model.predict(X[-test:]), y[-test:])]
     mae = sum(errors) / len(errors)
 
-    # 전체로 다시 학습 → 다음 시간 예측
+    # 전체로 다시 학습 → 한 시간씩 steps 번 이어서 예측 (예측값을 다음 입력으로 사용)
     model = LinearRegression().fit(X, y)
-    nxt = max(0, round(float(model.predict([vals[-LAGS:]])[0])))
+    window = list(vals[-LAGS:])
+    path = []
+    for _ in range(max(1, steps)):
+        nv = max(0.0, float(model.predict([window[-LAGS:]])[0]))
+        path.append(round(nv))
+        window.append(nv)
+    nxt = path[-1]
     return {
+        "hours": len(path),
+        "path": path,
         "ready": True,
         "points": len(vals),
         "recent": vals[-12:],
         "next_pm10": nxt,
         "next_grade": grade_pm10(nxt),
         "avg_error": round(mae, 1),
-        "model": f"LinearRegression(직전 {LAGS}시간 → 다음 1시간)",
+        "model": f"LinearRegression(직전 {LAGS}시간 → 다음 1시간, {len(path)}시간 뒤까지 반복)",
     }

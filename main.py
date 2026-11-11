@@ -33,14 +33,20 @@ import predict
 
 log = logging.getLogger("uvicorn.error")
 
-DATA_KEY = os.getenv("DATA_GO_KR_KEY", "").strip()
-SIDO = os.getenv("SIDO_NAME", "제주").strip()
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
-DEMO = os.getenv("DEMO_MODE", "0") == "1" or not DATA_KEY
+DATA_KEY = db.env("DATA_GO_KR_KEY")
+SIDO = db.env("SIDO_NAME", "제주")
+ADMIN_TOKEN = db.env("ADMIN_TOKEN")
+DEMO = db.env("DEMO_MODE", "0") == "1" or not DATA_KEY
 SOURCE = "demo" if DEMO else "airkorea"
-AUTO = os.getenv("AUTO_COLLECT", "1") == "1"
-MINUTES = int(os.getenv("COLLECT_MINUTES", "60"))
-FRONT_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("FRONT_ORIGINS", "").split(",") if o.strip()]
+AUTO = db.env("AUTO_COLLECT", "1") == "1"
+WARNINGS: list[str] = []                 # 설정이 이상해도 죽지 않고 여기에 적어 /health 에 보여 준다
+try:
+    MINUTES = max(1, int(db.env("COLLECT_MINUTES", "60")))
+except ValueError:
+    MINUTES = 60
+    WARNINGS.append("COLLECT_MINUTES 가 숫자가 아니라서 60 으로 처리했습니다")
+FRONT_ORIGINS = [o.strip().strip('"').strip("'").rstrip("/")
+                 for o in db.env("FRONT_ORIGINS").split(",") if o.strip()]
 
 store = db.get_store()
 
@@ -90,10 +96,21 @@ def home():
 
 @app.get("/health")
 def health():
-    missing = [k for k in ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "DATA_GO_KR_KEY",
-                           "ADMIN_TOKEN", "FRONT_ORIGINS"] if not os.getenv(k, "").strip()]
-    return {"ok": True, "mode": SOURCE, "store": store.kind,
-            "auto_collect_minutes": MINUTES if AUTO else None, "missing": missing}
+    names = ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "DATA_GO_KR_KEY", "ADMIN_TOKEN", "FRONT_ORIGINS"]
+    missing = [k for k in names if not db.env(k)]
+    problems = list(WARNINGS)
+    if store.error:
+        problems.append(store.error)
+    try:
+        store.ping()
+    except Exception as e:
+        problems.append(f"DB 연결/테이블 확인 실패: {str(e)[:150]}")
+    return {"ok": not problems, "mode": SOURCE, "store": store.kind,
+            "auto_collect_minutes": MINUTES if AUTO else None,
+            "missing": missing,                       # 아직 안 넣은 변수 이름
+            "problems": problems,                     # 서버가 대신 처리한 설정 문제
+            "front_origins": FRONT_ORIGINS,           # CORS 로 허용 중인 주소
+            "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/collect")
@@ -148,11 +165,11 @@ def air_summary():
 
 
 @app.get("/air/predict")
-def air_predict(station: str):
+def air_predict(station: str, hours: int = Query(1, ge=1, le=24, description="몇 시간 뒤까지 (24 = 내일 이맘때)")):
     hist = store.history(SOURCE, station)
     if not hist:
         raise HTTPException(404, f"'{station}' 측정소 데이터가 없습니다")
-    return {"station": station, **predict.predict_next(hist)}
+    return {"station": station, **predict.predict_next(hist, hours)}
 
 
 @app.get("/logs")
