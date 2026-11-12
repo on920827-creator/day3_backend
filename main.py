@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import collect
 import db
 import predict
+import story
 
 log = logging.getLogger("uvicorn.error")
 
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="제주 미세먼지 백엔드", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=FRONT_ORIGINS,
                    allow_methods=["*"], allow_headers=["*"])
+app.include_router(story.router)       # 설문대할망 스토리 웹의 'AI 장면 만들기' (ANTHROPIC_API_KEY 필요)
 
 
 @app.get("/")
