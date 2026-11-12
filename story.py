@@ -7,7 +7,9 @@ story.py — 설문대할망 스토리 웹의 'AI 장면 만들기'
   GET /story/scene?word=무지개&warm=2&curious=1&brave=0&end=e_bridge
 
 Railway Variables
-  ANTHROPIC_API_KEY   (필수) 없으면 503 → 화면이 '오프라인 장면'으로 대신 이어 간다
+  ANTHROPIC_API_KEY   Claude 키. 있으면 Claude 를 쓴다
+  GEMINI_API_KEY      (시험용) Claude 키가 없고 이 키만 있으면 Gemini 를 쓴다. 둘 다 없으면 503 → 화면이 '오프라인 장면'으로 대신 이어 간다
+  GEMINI_MODEL        (선택) 기본 gemini-3.1-flash-lite
   STORY_MODEL         (선택) 기본 claude-haiku-5-5
   STORY_PER_HOUR      (선택) 한 사람(IP)이 한 시간에 만들 수 있는 장면 수, 기본 20
 """
@@ -40,6 +42,9 @@ SYSTEM = """너는 제주 신화 '설문대할망' 이야기를 쓰는 동화 �
 - 눈에 보이고 들리는 모습을 쓴다. 소리 흉내말을 한두 개 넣는다. (예: 철벅, 우르르, 퐁퐁, 모락모락)
 - 마지막 문단은 '함께하면 따뜻해진다', '궁금해하는 마음이 길을 만든다'처럼 작고 따뜻한 깨달음이나 한마디로 끝낸다.
 - 설문대할망(하늘만큼 큰 여신)이 한라산, 오름, 바다, 마을 사람들과 함께 나온다. 할망이 직접 그 소재를 섬에 놓아 주거나 불러 준다.
+- 이야기하는 사람은 3인칭이다. '나', '내', '너', '관람자'라는 말은 쓰지 않는다. (예: '내 말에 귀를 기울였습니다' 금지) 대신 '그 말을 듣고'처럼 쓴다.
+- 첫 문장은 장면마다 다르게 시작한다. '빙그레 웃으며', '빙긋 웃으며'로 시작하는 문장은 쓰지 않는다. 소리 흉내말이나 소재의 모습으로 시작해도 좋다.
+- 마지막 한마디는 어린이가 알아들을 쉬운 말로 한 문장만 쓴다. ('아름다움', '생명의 숨결' 같은 어려운 낱말은 피한다)
 - 폭력·공포·슬픈 죽음·성적인 내용은 쓰지 않는다. 밝고 포근하게 마무리한다.
 
 기존 글 보기 (말투와 길이의 견본):
@@ -95,7 +100,25 @@ def parse_scene(text: str) -> dict | None:
     return {"title": title, "paragraphs": paras, "mood": mood, "element": element, "source": "ai"}
 
 
+async def ask_gemini(word: str, hint: str) -> str:
+    model = db.env("GEMINI_MODEL", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    gen = {"maxOutputTokens": 900, "temperature": 0.9, "responseMimeType": "application/json"}
+    if "2.5" in model:
+        gen["thinkingConfig"] = {"thinkingBudget": 0}      # 생각 토큰이 답 길이를 잡아먹지 않게 끈다
+    body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+            "contents": [{"role": "user", "parts": [{"text": f"관람자의 단어: {word}\n지금까지의 이야기 분위기: {hint}"}]}],
+            "generationConfig": gen}
+    async with httpx.AsyncClient(timeout=25) as c:
+        r = await c.post(url, headers={"x-goog-api-key": db.env("GEMINI_API_KEY"), "content-type": "application/json"}, json=body)
+    r.raise_for_status()
+    cand = (r.json().get("candidates") or [{}])[0]
+    return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
+
+
 async def ask_model(word: str, hint: str) -> str:
+    if not db.env("ANTHROPIC_API_KEY") and db.env("GEMINI_API_KEY"):
+        return await ask_gemini(word, hint)
     key = db.env("ANTHROPIC_API_KEY")
     body = {"model": db.env("STORY_MODEL", "claude-haiku-5-5") or "claude-haiku-5-5",
             "max_tokens": 900, "system": SYSTEM,
@@ -115,7 +138,7 @@ async def story_scene(request: Request,
     word = clean_word(word)
     if not word:
         return _reply({"error": "empty_word"}, 400)
-    if not db.env("ANTHROPIC_API_KEY"):
+    if not db.env("ANTHROPIC_API_KEY") and not db.env("GEMINI_API_KEY"):
         return _reply({"error": "no_key"}, 503)
     ip = (request.headers.get("x-forwarded-for", "").split(",")[0].strip()
           or (request.client.host if request.client else "?"))
